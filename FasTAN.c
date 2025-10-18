@@ -79,27 +79,9 @@ static char *emer(int x, int unit)
 #undef   SORT1
 #undef   SORT2
 #undef   SHOW_SEEDS
-#undef   SHOW_CHAINS
 #undef   SHOW_SEARCH
 #undef   SHOW_ALIGNMENTS
 #undef   COMPUTE_MODEL
-
-typedef struct
-  { uint16  diag;
-    uint16  ibeg;
-  } Seed;
-
-typedef struct
-  { uint16 diag;
-    uint16 count;
-  } Chord;
-
-static int CSORT(const void *l, const void *r)
-{ Chord *x = (Chord *) l;
-  Chord *y = (Chord *) r;
-
-  return (y->count - x->count);
-}
 
 #ifdef COMPUTE_MODEL
 
@@ -300,6 +282,23 @@ static int compute_model(uint8 *seq, int len, uint16 *alive, int unit)
 
 #endif
 
+typedef struct
+  { uint16  diag;
+    uint16  ibeg;
+  } Seed;
+
+typedef struct
+  { uint16 diag;
+    uint16 count;
+  } Chord;
+
+static int CSORT(const void *l, const void *r)
+{ Chord *x = (Chord *) l;
+  Chord *y = (Chord *) r;
+
+  return (y->count - x->count);
+}
+
 static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
 { Alignment  *align = bundle->align;
   Overlap    *over  = bundle->over;
@@ -494,7 +493,7 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
         for (x = diags[d-1]+1; x < diags[d]; x++)
           { p = hits[x].ibeg;
 #ifdef SHOW_SEARCH
-            printf("  p = %d\n",p);
+            printf("  p = %d (%d %d %d\n",p,last,hits[x-1].ibeg,mark[p+1]);
 #endif
             if (p < last || p - hits[x-1].ibeg > d || seq[p+1] >= 4)
               continue;
@@ -514,9 +513,11 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
 
             end = bpath->bepos - off;
             beg = bpath->abpos - off;
+
+            if (beg > p || end <= p)
+              continue;
             if (end > last)
               last = end;
-
             if (end-beg < 1.95*d)
               continue;
 
@@ -539,8 +540,8 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
             printf("\n");
 #endif
             printf(" Hit spans %d-%d\n",bpath->abpos,bpath->bepos);
-            Compute_Trace_PTS(Align,Work,100,GREEDIEST,d-wide,d+wide);
-            Print_Alignment(stdout,Align,Work,8,100,10,0,10,0);
+            Compute_Trace_PTS(align,work,100,GREEDIEST,d-wide,d+wide);
+            Print_Alignment(stdout,align,work,8,100,10,0,10,0);
 #endif
 
             if (bpath->aepos < bpath->bbpos)
@@ -710,6 +711,8 @@ int main(int argc, char *argv[])
       fflush(stderr);
     }
 
+  StartTime();
+
   { int       i, tid;
     pthread_t threads[NTHREADS];
     S_Bundle  parm[NTHREADS];
@@ -761,7 +764,7 @@ int main(int argc, char *argv[])
 
         // Launching job for contig i on thread tid
 
-printf("Launching %d\n",i); fflush(stdout);
+// printf("Launching %d\n",i); fflush(stdout);
 
         parm[tid].over->aread = i;
 

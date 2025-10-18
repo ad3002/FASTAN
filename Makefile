@@ -4,7 +4,7 @@ CFLAGS = -O3 -Wall -Wextra -Wno-unused-result -fno-strict-aliasing
 
 CC = gcc
 
-ALL = FasTAN
+ALL = FasTAN # NewTAN
 
 all: $(ALL)
 
@@ -13,6 +13,9 @@ GDB.h: gene_core.h
 
 FasTAN: FasTAN.c alncode.c alncode.h GDB.c GDB.h ONElib.c ONElib.h align.c align.h
 	$(CC) $(CFLAGS) -o FasTAN FasTAN.c alncode.c align.c GDB.c gene_core.c ONElib.c -lm -lz
+
+NewTAN: FasTAN.new.c alncode.c alncode.h GDB.c GDB.h ONElib.c ONElib.h align.c align.h
+	$(CC) $(CFLAGS) -o NewTAN FasTAN.new.c alncode.c align.c GDB.c gene_core.c ONElib.c -lm -lz
 
 clean:
 	rm -f $(ALL)
