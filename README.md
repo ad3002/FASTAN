@@ -25,7 +25,7 @@ FasTAN <source:path>[<precursor] <target:path>[.1aln]
 
 FasTAN takes a FASTA or 1GDB as input and outputs the off-diagonal alignment delimiting
 tandem repeats and their period as a .1aln file.
-For details on a .1aln file and how to convert is to PAF or PSL format, see
+For details on a .1aln file and how to convert it to PAF or PSL format, see
 the repo [FASTGA](www.github.com/thegenemyers/FASTGA).  For a program **tanbed** for
 converting the .1aln to a BED-file with the period see
 Richard Durbin's [alntools](www.github.com/richarddurbin/alntools).
