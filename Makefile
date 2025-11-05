@@ -7,6 +7,7 @@ DEST_DIR = ~/bin
 # Compiler settings
 CFLAGS = -O3 -Wall -Wextra -Wno-unused-result -fno-strict-aliasing
 CC = gcc
+LDFLAGS = -lm -lz -lpthread
 
 # Source path
 VPATH = $(SRC_DIR)
@@ -38,11 +39,11 @@ $(SRC_DIR)/GDB.h: $(SRC_DIR)/gene_core.h
 
 # FasTAN binary
 $(BIN_DIR)/FasTAN: $(FASTAN_SRCS) $(FASTAN_HDRS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(FASTAN_SRCS) -lm -lz
+	$(CC) $(CFLAGS) -o $@ $(FASTAN_SRCS) $(LDFLAGS)
 
 # aln2bed binary
 $(BIN_DIR)/aln2bed: $(ALN2BED_SRCS) $(ALN2BED_HDRS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(ALN2BED_SRCS) -lm -lz
+	$(CC) $(CFLAGS) -o $@ $(ALN2BED_SRCS) $(LDFLAGS)
 
 # Clean build artifacts
 clean:
