@@ -13,18 +13,13 @@ LDFLAGS = -lm -lz -lpthread
 VPATH = $(SRC_DIR)
 
 # Output binaries
-ALL = $(BIN_DIR)/FasTAN $(BIN_DIR)/aln2bed
+ALL = $(BIN_DIR)/FasTAN
 
 # Source files
 FASTAN_SRCS = $(SRC_DIR)/FasTAN.c $(SRC_DIR)/alncode.c $(SRC_DIR)/align.c \
               $(SRC_DIR)/GDB.c $(SRC_DIR)/gene_core.c $(SRC_DIR)/ONElib.c
 FASTAN_HDRS = $(SRC_DIR)/alncode.h $(SRC_DIR)/GDB.h $(SRC_DIR)/ONElib.h \
               $(SRC_DIR)/align.h $(SRC_DIR)/gene_core.h
-
-ALN2BED_SRCS = $(SRC_DIR)/aln2bed.c $(SRC_DIR)/alncode.c $(SRC_DIR)/GDB.c \
-               $(SRC_DIR)/gene_core.c $(SRC_DIR)/ONElib.c
-ALN2BED_HDRS = $(SRC_DIR)/alncode.h $(SRC_DIR)/GDB.h $(SRC_DIR)/ONElib.h \
-               $(SRC_DIR)/align.h $(SRC_DIR)/gene_core.h
 
 # Default target
 all: $(BIN_DIR) $(ALL)
@@ -41,19 +36,15 @@ $(SRC_DIR)/GDB.h: $(SRC_DIR)/gene_core.h
 $(BIN_DIR)/FasTAN: $(FASTAN_SRCS) $(FASTAN_HDRS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) -o $@ $(FASTAN_SRCS) $(LDFLAGS)
 
-# aln2bed binary
-$(BIN_DIR)/aln2bed: $(ALN2BED_SRCS) $(ALN2BED_HDRS) | $(BIN_DIR)
-	$(CC) $(CFLAGS) -o $@ $(ALN2BED_SRCS) $(LDFLAGS)
-
 # Clean build artifacts
 clean:
-	rm -f $(BIN_DIR)/FasTAN $(BIN_DIR)/aln2bed
+	rm -f $(BIN_DIR)/FasTAN
 	rm -fr $(BIN_DIR)/*.dSYM
 	rm -f FasTAN.tar.gz
 
 # Install binaries to destination
 install: all
-	cp $(BIN_DIR)/FasTAN $(BIN_DIR)/aln2bed $(DEST_DIR)
+	cp $(BIN_DIR)/FasTAN $(DEST_DIR)
 
 # Create source package
 package:
