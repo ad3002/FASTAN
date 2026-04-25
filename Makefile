@@ -4,7 +4,7 @@ CFLAGS = -O3 -Wall -Wextra -Wno-unused-result -fno-strict-aliasing
 
 CC = gcc
 
-ALL = FasTAN
+ALL = FasTAN NewTAN FastLTR FastTIR FastMICRO
 
 all: $(ALL)
 

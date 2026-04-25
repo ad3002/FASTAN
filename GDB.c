@@ -443,7 +443,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
 { GDB_SCAFFOLD  *scaffs;
   GDB_CONTIG    *contigs;
   ANO_PAIR      *masks;
-  int64         *moff;
+  int           *moff;
   OneProvenance *prov;
   char          *headers, *seqpath;
   int            ctgtop, scftop;
@@ -528,7 +528,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
   scaffs  = malloc(scftop*sizeof(GDB_CONTIG));
   headers = malloc(hdrtop);
   masks   = malloc((msktop+1)*sizeof(ANO_PAIR));
-  moff    = malloc((ctgtop+1)*sizeof(int64));
+  moff    = malloc((ctgtop+1)*sizeof(int));
   if (*spath != '/')
     gdb->srcpath = strdup(MyCatenate(getcwd(NULL,0),"/",spath,""));
   else
@@ -662,7 +662,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
             if (ncontig >= ctgtop)
               { ctgtop = 1.2*ncontig + 1000;
                 contigs = realloc(contigs,(ctgtop+1)*sizeof(GDB_CONTIG));
-                moff    = realloc(moff,(ctgtop+1)*sizeof(int64));
+                moff    = realloc(moff,(ctgtop+1)*sizeof(int));
                 if (contigs == NULL || moff == NULL)
                   { EPRINTF("Out of memory creating GDB for %s",spath);
                     goto error;
@@ -775,7 +775,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
       char         *line;
       int64         bpos, mpos, mask;
       int           nin, lastn;
-      int           boc, eoc;
+      int           boc, eoc, allow;
       int           s, x, m;
       uint8         byte;
 
@@ -794,6 +794,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
 
       nprov = 0;
       prov  = NULL;
+      allow = 1;
     
       //  Get the header of the first line.  If the file is empty skip.
     
@@ -928,7 +929,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
                           if (ncontig >= ctgtop)
                             { ctgtop = 1.2*ncontig + 1000;
                               contigs = realloc(contigs,(ctgtop+1)*sizeof(GDB_CONTIG));
-                              moff    = realloc(moff,(ctgtop+1)*sizeof(int64));
+                              moff    = realloc(moff,(ctgtop+1)*sizeof(int));
                               if (contigs == NULL || moff == NULL)
                                 { EPRINTF("Out of memory creating GDB for %s",spath);
                                   goto error;
@@ -1002,6 +1003,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
                               nmasks += 1;
                               mask = -1;
                             }
+                          allow = 0;
                         }
                       else
                         { if (mask < 0)
@@ -1055,6 +1057,8 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
         gzclose(input);
       else
         fclose(input);
+      if (allow)
+        nmasks = 0;
     }
 
   if (bps > 0)
@@ -1091,6 +1095,7 @@ FILE **Create_GDB(GDB *gdb, char *spath, int ftype, int bps, char *tpath, int nt
         { ano->nprov   = 0;
           ano->prov    = NULL;
           ano->gdb     = gdb;
+          ano->shared  = 1;
           ano->moff    = moff;
           masks        = realloc(masks,(nmasks+1)*sizeof(ANO_PAIR));
           ano->masks   = masks;
