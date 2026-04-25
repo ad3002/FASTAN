@@ -66,4 +66,4 @@ units.
 By default 8 threads are used and the output file names are the root name of the
 input with a .1aln or .1ano suffix as per the options.  You can direct the output
 to a particular root path with the -o option, and control the number of threads
-with the -T option.ZZ
+with the -T option.
