@@ -1184,9 +1184,11 @@ int main(int argc, char *argv[])
           parm[i].ofile = Ofile + i;
         else
           parm[i].ofile = NULL;
-        parm[i].gdb   = gdb;
-        parm[i]._gdb  = _gdb;
+
+        parm[i].gdb  = &parm[i]._gdb;
+        parm[i]._gdb = _gdb;
         parm[i]._gdb.seqs = units[i];
+
         parm[i].work  = New_Work_Data();
         if (i == 0)
           parm[i].spec = New_Align_Spec(.7,TSPACE,gdb->freq,0);
