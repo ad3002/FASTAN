@@ -9,30 +9,68 @@
 
 #include "gene_core.h"
 
-#ifdef INTERACTIVE
-
-char Ebuffer[1000];
-
-#endif
-
 /*******************************************************************************************
  *
  *  GENERAL UTILITIES
  *
  ********************************************************************************************/
 
+char *Error_Buffer;
+
 char *Prog_Name;
 
 char *Command_Line;
+
+int EPRINTF(char *format, ...)
+{ va_list args;
+  int     rval;
+
+  va_start(args,format);
+  if (Error_Buffer == NULL)
+    { fprintf(stderr,"%s: ",Prog_Name);
+      rval = vfprintf(stderr,format,args);
+      fprintf(stderr,"\n");
+    }
+  else
+    rval = vsprintf(Error_Buffer,format,args);
+  va_end(args);
+  return (rval);
+}
+
+int WPRINTF(char *format, ...)
+{ va_list args;
+  int     rval;
+
+  va_start(args,format);
+  if (Error_Buffer == NULL)
+    rval = vfprintf(stderr,format,args);
+  else
+    rval = vsprintf(Error_Buffer,format,args);
+  va_end(args);
+  return (rval);
+}
+
+char *SafeTemp(char *template)
+{ close(mkstemp(template));
+  unlink(template);
+  return (template);
+}
+
+void SystemX(char *command)
+{ if (system(command) != 0)
+    { fprintf(stderr,"%s: Command '%s' failed\n",Prog_Name,command);
+      exit (1);
+    }
+}
 
 void *Malloc(int64 size, char *mesg)
 { void *p;
 
   if ((p = malloc(size)) == NULL)
     { if (mesg == NULL)
-        EPRINTF(EPLACE,"%s: Out of memory\n",Prog_Name);
+        EPRINTF("Out of memory");
       else
-        EPRINTF(EPLACE,"%s: Out of memory (%s)\n",Prog_Name,mesg);
+        EPRINTF("Out of memory (%s)",mesg);
       EXIT(NULL);
     }
   // printf("Alloc %10lld / %12lld: %s\n",size,(int64) p,mesg);
@@ -44,9 +82,9 @@ void *Realloc(void *p, int64 size, char *mesg)
     size = 1;
   if ((p = realloc(p,size)) == NULL)
     { if (mesg == NULL)
-        EPRINTF(EPLACE,"%s: Out of memory\n",Prog_Name);
+        EPRINTF("Out of memory");
       else
-        EPRINTF(EPLACE,"%s: Out of memory (%s)\n",Prog_Name,mesg);
+        EPRINTF("Out of memory (%s)",mesg);
       EXIT(NULL);
     }
   // printf("Alloc %10lld / %12lld: %s\n",size,(int64) p,mesg);
@@ -60,9 +98,9 @@ char *Strdup(char *name, char *mesg)
     return (NULL);
   if ((s = strdup(name)) == NULL)
     { if (mesg == NULL)
-        EPRINTF(EPLACE,"%s: Out of memory\n",Prog_Name);
+        EPRINTF("Out of memory");
       else
-        EPRINTF(EPLACE,"%s: Out of memory (%s)\n",Prog_Name,mesg);
+        EPRINTF("%s: Out of memory (%s)",mesg);
       EXIT(NULL);
     }
   return (s);
@@ -75,9 +113,9 @@ char *Strndup(char *name, int len, char *mesg)
     return (NULL);
   if ((s = strndup(name,len)) == NULL)
     { if (mesg == NULL)
-        EPRINTF(EPLACE,"%s: Out of memory\n",Prog_Name);
+        EPRINTF("%s: Out of memory");
       else
-        EPRINTF(EPLACE,"%s: Out of memory (%s)\n",Prog_Name,mesg);
+        EPRINTF("%s: Out of memory (%s)",mesg);
       EXIT(NULL);
     }
   return (s);
@@ -89,7 +127,7 @@ FILE *Fopen(char *name, char *mode)
   if (name == NULL || mode == NULL)
     return (NULL);
   if ((f = fopen(name,mode)) == NULL)
-    { EPRINTF(EPLACE,"%s: Cannot open %s for '%s'\n",Prog_Name,name,mode);
+    { EPRINTF("%s: Cannot open %s for '%s'",name,mode);
       EXIT(NULL);
     }
   return (f);
@@ -152,7 +190,7 @@ char *Catenate(char *path, char *sep, char *root, char *suffix)
   if (len > max)
     { max = ((int) (1.2*len)) + 100;
       if ((cat = (char *) realloc(cat,max+1)) == NULL)
-        { EPRINTF(EPLACE,"%s: Out of memory (Cat'ing 4 strings)\n",Prog_Name);
+        { EPRINTF("Out of memory (Cat'ing 4 strings)");
           EXIT(NULL);
         }
     }
@@ -175,7 +213,7 @@ char *Numbered_Suffix(char *left, int num, char *right)
   if (len > max)
     { max = ((int) (1.2*len)) + 100;
       if ((suffix = (char *) realloc(suffix,max+1)) == NULL)
-        { EPRINTF(EPLACE,"%s: Out of memory (Making number suffix for %d)\n",Prog_Name,num);
+        { EPRINTF("Out of memory (Making number suffix for %d)",num);
           EXIT(NULL);
         }
     }
@@ -331,26 +369,31 @@ void Compress_Read(int len, char *s)
 
 //  Uncompress read form 2-bits per base into [0-3] per byte representation
 
-void Uncompress_Read(int len, char *s)
+void Uncompress_Read(int len, char *s, int beg)
 { int   i, tlen, byte;
   char *s0, *s1, *s2, *s3;
   char *t;
 
-  s0 = s;
+  beg &= 0x3;
+
+  s0 = s-beg;
   s1 = s0+1;
   s2 = s1+1;
   s3 = s2+1;
 
-  tlen = (len-1)/4;
+  tlen = ((len+beg)-1)/4;
 
   t = s+tlen;
-  for (i = tlen*4; i >= 0; i -= 4)
+  for (i = tlen*4; i >= 4; i -= 4)
     { byte = *t--;
       s3[i] = (char) ((byte >> 6) & 0x3);
       s2[i] = (char) ((byte >> 4) & 0x3);
       s1[i] = (char) ((byte >> 2) & 0x3);
       s0[i] = (char) (byte & 0x3);
     }
+  byte = *t;
+  for (i = 3; i >= beg; i--)
+    s0[i] = ((byte >> (2*i)) & 0x3);
   s[len] = 4;
 }
 

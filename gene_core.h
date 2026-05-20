@@ -5,27 +5,6 @@
 #include <stdio.h>
 #include <time.h>
 
-//  For interactive applications where it is inappropriate to simply exit with an error
-//    message to standard error, define the constant INTERACTIVE.  If set, then error
-//    messages are put in the global variable Ebuffer and the caller of a core routine
-//    can decide how to deal with the error.
-
-#ifdef INTERACTIVE
-
-#define EPRINTF sprintf
-#define EPLACE  Ebuffer
-#define EXIT(x) return (x)
-
-extern char Ebuffer[];
-
-#else // BATCH
-
-#define EPRINTF fprintf
-#define EPLACE  stderr
-#define EXIT(x) exit (1)
-
-#endif
-
 /*******************************************************************************************
  *
  *  MY STANDARD TYPE DECLARATIONS
@@ -48,6 +27,8 @@ typedef double             float64;
  *  MACROS TO HELP PARSE COMMAND LINE
  *
  ********************************************************************************************/
+
+extern char *Error_Buffer;   //  If non-NULL place error messages here
 
 extern char *Prog_Name;   //  Name of program, available everywhere
 
@@ -74,6 +55,7 @@ extern char *Command_Line;   //  Name of program, available everywhere
     *c = '\0';							\
   }								\
 								\
+  Error_Buffer = NULL;  	        			\
   Prog_Name = Strdup(name,"");          			\
   for (i = 0; i < 128; i++)             			\
     flags[i] = 0;
@@ -121,12 +103,32 @@ extern char *Command_Line;   //  Name of program, available everywhere
 
 /*******************************************************************************************
  *
+ *  ERROR HANDLING
+ *
+ ********************************************************************************************/
+
+#define EXIT(x)			\
+{ if (Error_Buffer == NULL)	\
+    exit (1);			\
+  return (x);			\
+}
+
+int EPRINTF(char *format, ...);
+int WPRINTF(char *format, ...);
+
+
+/*******************************************************************************************
+ *
  *  MEMORY ALLOCATION,FILE HANDLING, AND PRETTY PRINTING UTILITIES
  *
  ********************************************************************************************/
 
 //  The following general utilities return NULL if any of their input pointers are NULL, or if they
 //    could not perform their function (in which case they also print an error to stderr).
+    
+char *SafeTemp(char *name_core);                         //  mkstemp used for safe temporary
+    
+void SystemX(char *command);                             //  Guarded version of system
 
 void *Malloc(int64 size, char *mesg);                    //  Guarded versions of malloc, realloc
 void *Realloc(void *object, int64 size, char *mesg);     //  and strdup, that output "mesg" to
@@ -155,8 +157,8 @@ int  Number_Digits(int64 num);                            //  Return # of digits
 
 #define COMPRESSED_LEN(len)  (((len)+3) >> 2)
 
-void   Compress_Read(int len, char *s);   //  Compress read in-place into 2-bit form
-void Uncompress_Read(int len, char *s);   //  Uncompress read in-place into numeric form
+void   Compress_Read(int len, char *s);            //  Compress read in-place into 2-bit form
+void Uncompress_Read(int len, char *s, int beg);   //  Uncompress read in-place into numeric form
 void      Print_Read(char *s, int width);
 
 void Lower_Read(char *s);     //  Convert read from numbers to lowercase letters (0-3 to acgt)

@@ -19,31 +19,35 @@
 #include <dirent.h>
 
 #include "GDB.h"
+#include "ANO.h"
 #include "align.h"
 #include "alncode.h"
 
-#define TSPACE   100
-#define VERSION "0.1"
+#undef   PROLOG
+#undef   SORT1
+#undef   SORT2
+#undef   SHOW_SEEDS
+#undef   SHOW_SEARCH
+#undef   SHOW_ALIGNMENTS
 
-static char *Usage = "[-vm] [-T(8)] <source:path>[<fa_extn>|<1_extn>] <target>[.1aln]";
+#undef   SHOW_BITVEC
+#undef   SHOW_PARSE
+
+#define DIAG_MAX        30000
+#define DIAG_MIN            2
+#define BLOCK_OVERLAP  0x6000
+
+#define TSPACE     100
+#define VERSION  "0.5"
+#define MBUF_LEN   200  //  Must be even
+
+static char *Usage = "[-vamp] [-T(8)] [-o<target>] <source:path>[<fa_extn>|<1_extn>|.1gdb]";
 
 static int NTHREADS;
 static int VERBOSE;
-static int MODELS;
-
-typedef struct
-   { int         tid;
-     OneFile    *ofile;
-     Work_Data  *work;
-     Align_Spec *spec;
-     GDB         _gdb, *gdb;
-     Overlap     _over, *over;
-     Alignment   _align, *align;
-     void       *block;
-     uint8      *buffer;
-     int         tmax;
-     int64      *trace;
-   } S_Bundle;
+static int MAKE_ALN;
+static int MAKE_ANO;
+static int PARSE;
 
 static char dna[4] = { 'a', 'c', 'g', 't' };
 
@@ -69,218 +73,540 @@ static char *emer(int x, int unit)
 
 /*******************************************************************************************
  *
- *  SEED CHAIN DETECTOR
+ *  CUT SEQUENCE INTO UNITS USING BITVECTOR MODEL
  *
  ********************************************************************************************/
 
-#define DIAG_MAX 8000
+#define START(P,M,s)		\
+{ P = 0xffffffffffffffffllu;	\
+  M = 0;			\
+  s = patlen;			\
+}
 
-#undef   PROLOG
-#undef   SORT1
-#undef   SORT2
-#undef   SHOW_SEEDS
-#undef   SHOW_SEARCH
-#undef   SHOW_ALIGNMENTS
-#undef   COMPUTE_MODEL
+#define START_BLK(p,m)		\
+{ p = 0xffffffffffffffffllu;	\
+  m = 0;			\
+}
 
-#ifdef COMPUTE_MODEL
+//  (P,M) is the delta-state of the current column
+//  v is the 0/1 match vector for the symbol to advance over
+//  s is the score of the element in the top row before on entry, and after on completion
+//  c is whether or not to inject a new start (0), or not (1)
 
-typedef struct
-  { int    edge[4];
-    int    count;
-    uint16 kmer;
-    uint16 mark;
-    uint16 depth;
-  } Dnode;
+#define ADVANCE(P,M,v,c,s)		\
+{ uint64 V, H, Q, N;			\
+					\
+  V  = v | (c < 0);			\
+  H  = (((V & P) + P) ^ P) | V;		\
+  V |= M;				\
+					\
+  Q = M | ~ (H | P);			\
+  N = P & H;				\
+					\
+  H = (Q << 1) | (c > 0);		\
+  P = (N << 1) | ~ (V | H) | (c < 0);	\
+  M = H & V;				\
+					\
+  if (Q & bit)				\
+    s += 1;				\
+  else if (N & bit)			\
+    s -= 1;				\
+}
 
-static int compute_model(uint8 *seq, int len, uint16 *alive, int unit)
-{ int     i, x, c, e;
-  uint16  kmer, klen, umask;
-  uint8  *s7, *s8;
-  int     l7;
-  int     clen;
+//  Here (p,m) is the delta-state, and c is the delta between columns (-1,0,1)
 
-  int    stop, node;
-  Dnode *stack;
-  int    maxnode, maxcount;
-  double density;
-  int    dcut;
-  int   *mark;
+#define ADVANCE_BLK(p,m,v,c) 	 	\
+{ uint64 V, H, Q, N, P, M, x;      	\
+					\
+  P  = p;                       	\
+  M  = m;				\
+  x  = (c < 0);				\
+  V  = v | x;				\
+  H  = (((V & P) + P) ^ P) | V;		\
+  V |= M;				\
+					\
+  Q = M | ~ (H | P);			\
+  N = P & H;				\
+					\
+  H = (Q << 1) | (c > 0);		\
+  p = (N << 1) | ~ (V | H) | x;		\
+  m = H & V;				\
+					\
+  if (Q & 0x8000000000000000llu)	\
+    c = 1;				\
+  else if (N & 0x8000000000000000llu)	\
+    c = -1;				\
+  else					\
+    c = 0;				\
+}
 
-  if (unit > 8)
-    klen = 8;
-  else
-    klen = unit;
+#define PRINT_BLOCK(p,m) 		\
+{ uint64 P, M;			      	\
+  int d;				\
+					\
+  P  = p;                       	\
+  M  = m;				\
+  for (d = 0; d < 64; d++)		\
+    if (P & (((long) 1) << d))		\
+      printf("+");			\
+    else if (M & (((long) 1) << d))	\
+      printf("-");			\
+    else				\
+      printf("0");			\
+  printf(" ");				\
+}
 
-  s7 = seq+(klen-1);
-  s8 = seq+klen;
-  l7 = len-(klen-1);
-  if (klen >= 8)
-    umask = 0xffff; 
-  else
-    umask = (1 << (2*klen)) - 1;
+#define PRINT_COLUMN(P,M,s,x)	 	\
+{ int d;				\
+					\
+  for (d = 0; d < patrem; d++)		\
+    if (P & (((long) 1) << d))		\
+      printf("+");			\
+    else if (M & (((long) 1) << d))	\
+      printf("-");			\
+    else				\
+      printf("0");			\
+  printf(" [%d]",s);			\
+  if (x >= 0)				\
+    printf(" [%d]",x);			\
+  printf("\n");				\
+  fflush(stdout);			\
+}
 
-  stop = 0;         //  count # of each 8-mer
-  kmer = seq[0];
-  for (i = 1; i < klen-1; i++)
-    { x = seq[i];
-      kmer = (kmer << 2) | x;
-    }
-  for (i = 0; i < l7; i++)
-    { x = s7[i];
-      kmer = ((kmer << 2) | x) & umask;
-      node = alive[kmer];
-      if (node == 0)
-        { alive[kmer] = 0x7fff;
-          stop += 1;
-        }
-    }
+static int64 *bitvec_partition(uint8 *seq, int *len, uint8 *pat, int patlen, int unit)
+{ int64 *partition;
+  int    parlen;
 
-  stack = malloc(sizeof(Dnode)*stop);
-  mark  = malloc(sizeof(int)*stop);
-  if (stack == NULL || mark == NULL)
-    { printf("MALLOC\n");
+  if (patlen > unit) patlen = unit;
+
+  int nblocks = (patlen>>6);
+  int patrem  = (patlen & 0x3f);
+  int seqlen  = *len;
+  int var     = (unit-2)/3+1;
+  uint64 bit  = (0x1llu << (patrem-1));
+
+  parlen    = 0;
+  partition = malloc(sizeof(int64)*(1.2*(seqlen/unit)+10));
+  if (partition == NULL)
+    { fprintf(stderr,"%s: Out of memory partitioning tandem array\n",Prog_Name);
       exit (1);
     }
 
-  maxcount = 0;
-  stop = 0;         //  count # of each 8-mer
-  kmer = seq[0];
-  for (i = 1; i < klen-1; i++)
-    { x = seq[i];
-      kmer = (kmer << 2) | x;
-    }
-  for (i = 0; i < l7; i++)
-    { x = s7[i];
-      kmer = ((kmer << 2) | x) & umask;
-      node = alive[kmer];
-      if (node == 0x7fff)
-        { alive[kmer] = node = stop++;
-          stack[node].edge[0] = stack[node].edge[1] = stack[node].edge[2] = stack[node].edge[3] = 0;
-          stack[node].kmer    = kmer;
-          stack[node].count   = 0;
-          stack[node].mark    = 0;
+#ifdef SHOW_BITVEC
+  printf("\nBit vect partition: %d = %d blocks + %d rem, unit = %d, var = %d\n",
+         patlen,nblocks,patrem,unit,var);
+#endif
+
+  { uint64 revt[4][nblocks+1];
+    uint64 fort[4][nblocks+1];
+    uint64 p[nblocks+1];
+    uint64 m[nblocks+1];
+    uint64 a[nblocks+1];
+    uint64 b[nblocks+1];
+  
+    //  setup pattern vectors
+  
+    { uint8 *rat;
+      int    i, j, k;
+      int    s, n;
+      uint64 P, M, Q;
+  
+      rat = pat+(patlen-1);
+      for (j = n = 0; j < patlen; j += 64, n++)
+        { for (s = 0; s < 4; s++)
+            { P = 0;
+              Q = 0;
+              M = 1;
+              k = j+64;
+              for (i = j; i < k; i++)
+                { if (i >= patlen)
+                    break;
+                  if (s == pat[i])
+                    P |= M;
+                  if (s == rat[-i])
+                    Q |= M;
+                  M <<= 1;
+                }
+              for ( ; i < k; i++)
+                { P |= M;
+                  Q |= M;
+                  M <<= 1;
+                }
+              fort[s][n] = P;
+              revt[s][n] = Q;
+            }
         }
-      stack[node].count += 1;
-      stack[node].edge[s8[i]] += 1;
-      if (stack[node].count > maxcount)
-        { maxcount = stack[node].count;
-          maxnode  = node;
-        }
-    }
-
-  density = (1.*len)/unit;
-  printf("\nDB Graph(%d): %d ave = %d/%d = %.1f\n",klen,stop,len,unit,density);
-  printf("  max = %d (%d)\n",maxnode,maxcount);
-  dcut = .05*density;
-  if (dcut < 1)
-    dcut = 1;
-
-  { int n, m, p, y, e, x, s;
-    int mtop;
-    int emax, enod, etod, echr;
-    int deep;
-
-    clen = 0;
-    mtop = 0;
-    stack[maxnode].mark = 2;
-    stack[maxnode].depth = 0;
-    mark[mtop++] = maxnode;
-    for (i = 0; i < 10; i++)
-      { emax = 0;
-        for (s = 0; s < mtop; s++)
-          { n = mark[s];
-            p = (stack[n].kmer << 2) & umask;
-            for (x = 0; x < 4; x++)
-              { if (stack[n].edge[x] <= emax) 
-                  continue;
-                m = alive[p | x];
-                if (stack[m].mark)
-                  continue;
-                emax = stack[n].edge[x];
-                enod = n;
-                etod = m;
-                echr = x;
+  
+#ifdef SHOW_BITVEC
+      { int     d;
+        uint64 *v;
+  
+        for (d = 0; d < 2; d++)
+          { printf("     ");
+            if (d == 0)
+              { for (i = 0; i < patlen; i++)
+                  printf("%c",dna[pat[i]]);
+              }
+            else
+              { for (i = 0; i < patlen; i++)
+                  printf("%c",dna[rat[-i]]);
+              }
+            printf("\n");
+            for (s = 0; s < 4; s++)
+              { if (d == 0)
+                  v = fort[s];
+                else
+                  v = revt[s];
+                printf("  %c: ",dna[s]);
+                for (i = 0; i < patlen; i++)
+                  { if (*v & (0x1llu<<(i&0x3f)))
+                      printf("1");
+                    else
+                      printf("0");
+                    if ((i&0x3f) == 63)
+                      v += 1;
+                  }
+                printf("\n");
               }
           }
-        if (emax <= dcut)
-          break;
-
-        printf("\n  %d(%d) : %d\n",enod,stack[enod].count,stack[enod].depth);
-        deep = stack[enod].depth+1;
-        printf("      -%c(%d)-> %d(%d) : %d\n",dna[echr],emax,etod,stack[etod].count,deep);
-        n = etod;
-        while (stack[n].mark == 0)
-          { stack[n].mark = 1;
-            stack[n].depth = deep;
-            y = 0;
-            e = stack[n].edge[y];
-            for (x = 1; x < 4; x++)
-              if (stack[n].edge[x] > e)
-                { y = x;
-                  e = stack[n].edge[y];
-                }
-            p = (stack[n].kmer << 2) & umask;
-            n = alive[p | y];
-            deep += 1;
-            printf("      -%c(%d)-> %d(%d) : %d\n",dna[y],e,n,stack[n].count,deep);
-          }
-        if (stack[n].depth == deep || (n == maxnode && stack[n].depth == clen))
-          printf("   Detour\n");
-        if (stack[n].mark == 1)
-          printf("   New cycle @ %d\n",n);
-        if (clen == 0)
-          { clen = deep - stack[n].depth;
-            printf("   Main unit len = %d\n",clen);
-          }
-
-        printf("\n   %c",dna[echr]);
-        n = etod;
-        while (stack[n].mark == 1)
-          { stack[n].mark = 2;
-            mark[mtop++]  = n;
-            y = 0;
-            e = stack[n].edge[y];
-            p = (stack[n].kmer << 2) & umask;
-            for (x = 1; x < 4; x++)
-              if (stack[n].edge[x] > e)
-                { y = x;
-                  e = stack[n].edge[y];
-                }
-            n = alive[p | y];
-            printf("%c",dna[y]);
-          }
-        printf("\n");
       }
+#endif
+    }
+   
+    //  forward scan
+  
+    { int    Score[128], s;
+      uint64 P, M, *v;
+      int    tlow, tmid, thgh;
+      int    bloc, ploc, oloc;
+      int    best, pest, oest;
+      int    i, n, c;
+  
+#ifdef SHOW_PARSE
+      printf("Forward Scan\n");
+#endif
+  
+      for (n = 0; n < nblocks; n++)
+        START_BLK(p[n],m[n]);
+      START(P,M,s);
+
+      //  find first partition point
+  
+      thgh = unit + var;
+      pest = patlen;
+      best = patlen;
+      bloc = 0;
+      for (i = 0; i < thgh; )
+        { c = 0;
+          v = fort[seq[i]];
+          for (n = 0; n < nblocks; n++)
+            ADVANCE_BLK(p[n],m[n],*v++,c);
+          ADVANCE(P,M,*v,c,s)
+#ifdef SHOW_BITVEC
+          printf("  %6d %c: ",i+1,dna[seq[i]]);
+          for (n = 0; n < nblocks; n++)
+            PRINT_BLOCK(p[n],m[n]);
+          PRINT_COLUMN(P,M,s,-1);
+#endif
+          i += 1;
+          if (s < best)
+            { best = s; bloc = i; }
+          else if (i-bloc >= var && best <= .3*patlen)
+            break;
+        }
+#ifdef SHOW_BITVEC
+      printf("Report %d @ %d\n",best,bloc);
+      fflush(stdout);
+#endif
+  
+      tmid = bloc + unit;
+      tlow = tmid - var;
+      thgh = tmid + var;
+
+      oloc = 0;
+      oest = -1;
+      ploc = bloc;
+      pest = best;
+      best = patlen;
+
+      //  carry on finding partition points [unit-var,unit+var] from the last one
+  
+      while (i < seqlen)
+        { c = 0;
+          v = fort[seq[i]];
+          for (n = 0; n < nblocks; n++)
+            ADVANCE_BLK(p[n],m[n],*v++,c);
+          ADVANCE(P,M,*v,c,s)
+#ifdef SHOW_BITVEC
+          printf("  %6d %c: ",i+1,dna[seq[i]]);
+          for (n = 0; n < nblocks; n++)
+            PRINT_BLOCK(p[n],m[n]);
+          PRINT_COLUMN(P,M,s,-1);
+          fflush(stdout);
+#endif
+  
+          i += 1;
+          if (i >= tlow)
+            { if (i == thgh)
+                {
+#ifdef SHOW_BITVEC
+                  printf("Report %d @ %d\n",best,bloc);
+                  fflush(stdout);
+#endif
+                  if (unit == patlen && pest != 0)
+                    { uint64 A, B;
+                      int    nloc, nest;
+                      int    j, t, x, y;
+  
+                      tlow = ploc-var;
+                      if (tlow <= oloc)
+                        tlow = oloc+1;
+                      thgh = ploc+var;
+                      pest = (patlen<<3);
+
+                      for (n = 0; n < nblocks; n++)
+                        START_BLK(a[n],b[n]);
+                      START(A,B,t);
+                      for (j = oloc; j <= thgh; )
+                        { c = 1;
+                          v = fort[seq[j]];
+                          for (n = 0; n < nblocks; n++)
+                            ADVANCE_BLK(a[n],b[n],*v++,c);
+                          ADVANCE(A,B,*v,c,t);
+                          j += 1;
+                          Score[j-oloc] = t;
+                        }
+                          
+                      for (n = 0; n < nblocks; n++)
+                        START_BLK(a[n],b[n]);
+                      START(A,B,t);
+                      for (j = bloc-1; j >= tlow; j--)
+                        { c = 1;
+                          v = revt[seq[j]];
+                          for (n = 0; n < nblocks; n++)
+                            ADVANCE_BLK(a[n],b[n],*v++,c);
+                          ADVANCE(A,B,*v,c,t);
+                          if (j > ploc+var)
+                            continue;
+                          y = Score[j-oloc];
+                          x = t+y;
+#ifdef SHOW_BITVEC
+                          printf("  %6d %c: ",j,dna[seq[j]]);
+                          for (n = 0; n < nblocks; n++)
+                            PRINT_BLOCK(a[n],b[n]);
+                          PRINT_COLUMN(A,B,t,y);
+#endif
+                          if (x < pest)
+                            { pest = x;
+                              nloc = j;
+                              nest = t;
+                            }
+                          else if (x == pest && t < nest) 
+                            { nloc = j;
+                              nest = t;
+                            }
+                        }
+#ifdef SHOW_BITVEC
+                      printf("Best is %d @%d delta = %d\n",pest,nloc,nloc-ploc);
+                      fflush(stdout);
+#endif
+                      oest = pest-nest;
+                      ploc = nloc;
+                      pest = nest;
+                    }
+#ifdef SHOW_PARSE
+                  if (oloc == 0)
+                    printf("       ");
+                  else
+                    printf("%5d: ",parlen-1);
+                  Print_Seq(seq+oloc,ploc-oloc);
+                  if (oloc == 0)
+                    printf(" ? [%d..%d] tail\n",oloc,ploc);
+                  else
+                    printf(" %d [%d..%d]\n",oest,oloc,ploc);
+                  fflush(stdout);
+#else
+                  (void) oest;
+#endif
+                  if (oloc < ploc)
+                    partition[parlen++] = ploc;
+
+                  tmid = bloc + unit;
+                  tlow = tmid - var;
+                  thgh = tmid + var;
+  
+                  oest = pest;
+                  oloc = ploc;
+                  pest = best;
+                  ploc = bloc;
+                  best = patlen;
+                }
+              else
+                { if (s < best)
+                    { best = s; bloc = i; }
+                  else if (s == best && abs(bloc-tmid) >= abs(i-tmid))
+                    { best = s; bloc = i; } 
+                }
+            }
+        }
+#ifdef SHOW_PARSE
+      printf("%5d: ",parlen-1);
+      Print_Seq(seq+oloc,ploc-oloc);
+      printf(" %d [%d..%d] \n",oest,oloc,ploc);
+#endif
+      partition[parlen++] = ploc;
+      if (best < .3*patlen && bloc < seqlen-10)    //  the last minimum probably a partition point
+        { oloc = ploc;                             //  if <30% difference and a bit away from end
+          ploc = bloc;                             //   of sequence
+#ifdef SHOW_PARSE
+          printf("%5d: ",parlen-1);
+          Print_Seq(seq+oloc,ploc-oloc);
+          printf(" %d [%d..%d] \n",pest,oloc,ploc);
+#endif
+          partition[parlen++] = bloc;              //  not harmful to include it in consensus
+                                                   //   evaluation even if truncated.
+        }
+#ifdef SHOW_PARSE
+      printf("       ");
+      Print_Seq(seq+ploc,seqlen-ploc);
+      printf(" ? [%d..%d] tail\n",ploc,seqlen);
+      fflush(stdout);
+#endif
+    }
   }
 
-  for (i = 0; i < stop; i++)
-    { kmer = stack[i].kmer;
-      c    = stack[i].count;
-      if (c <= dcut)
-        continue;
-      printf(" %3d: %s(%d)\n",i,emer(kmer,klen),c);
-      for (x = 0; x < 4; x++)
-        { e = stack[i].edge[x];
-          if (e <= dcut)
-            continue;
-          printf("      -%c(%d)-> %d\n",dna[x],e,alive[((kmer << 2) | x) & umask]);
+  *len = parlen;
+  return (partition);
+}
+
+  //  return 1st position of x-mer with the highest sum of the x-7 of 8-mer counts within it
+
+static int best_seed(uint8 *seq, int len, uint16 *alive, int xmer, int unit)
+{ int     i, x, y, r;
+  uint16  kmer;
+  int     best, kloc;
+  int     count[xmer], wrap, score;
+  int     wmax;
+
+  wrap = xmer-7;
+  wmax = len/unit+1;
+
+  kmer = seq[0];
+  for (i = 1; i < 7; i++)
+    kmer = (kmer << 2) | seq[i];
+  for (i = 7; i < len; i++)
+    { kmer = ((kmer << 2) | seq[i]) & 0xffff;
+      x = alive[kmer];
+      if (x < wmax)
+        alive[kmer] = x+1;
+    }
+
+  kmer = seq[0];
+  for (i = 1; i < 7; i++)
+    kmer = (kmer << 2) | seq[i];
+  r = 0;
+  score = 0;
+  for (i = 7; i < xmer; i++)
+    { kmer = ((kmer << 2) | seq[i]) & 0xffff;
+      x = alive[kmer];
+      count[r++] = x;
+      score += x;
+    }
+  r = 0;
+  best = score;
+  kloc = xmer-1;
+  for (i = xmer; i < len; i++)
+    { kmer = ((kmer << 2) | seq[i]) & 0xffff;
+      y = count[r];
+      x = alive[kmer];
+      count[r] = x;
+      score += x-y;
+      if (score > best)
+        { best = score;
+          kloc = i; 
+        }
+      if (++r == wrap)
+        r = 0;
+    }
+  kloc -= xmer-1;
+
+  if (len < 0x8000)
+    { for (i = 0; i < 0x10000; i++)
+        alive[i] = 0;
+    }
+  else
+    { kmer = seq[0];
+      for (i = 1; i < 7; i++)
+        kmer = (kmer << 2) | seq[i];
+      for (i = 7; i < len; i++)
+        { kmer = ((kmer << 2) | seq[i]) & 0xffff;
+          alive[kmer] = 0;
         }
     }
 
-  for (i = 0; i < stop; i++)
-    alive[stack[i].kmer] = 0;
+#ifdef SHOW_BITVEC
+  printf("Best %d-mer is at %d with 8-mer score %d (",xmer,kloc,best);
+  Print_Seq(seq+kloc,xmer);
+  printf(")\n");
+#endif
 
-  free(mark);
-  free(stack);
-
-  if (clen < .9*unit)
-    printf("    Bad call\n");
-
-  return (clen);
+  return (kloc);
 }
 
-#endif
+/*******************************************************************************************
+ *
+ *  DIAGONAL HITS DETECTOR
+ *
+ ********************************************************************************************/
+
+  //  Thread bundle
+
+typedef struct
+   { int         tid;
+     OneFile    *ofile;
+     GDB        _gdb, *gdb;
+
+     Work_Data  *work;     //  alignment machinery
+     Align_Spec *spec;
+     Overlap     _over, *over;
+     Alignment   _align, *align;
+
+     uint8      *buffer;   //  contig buffer
+
+     void       *block;    //  memory block for diagonal analyzer (524MB)
+
+     int         tmax;     //  i64 trace vector for 1-file
+     int64      *trace;
+
+     OneFile    *mfile;
+     int         mscf;
+     int64       moff;
+   } S_Bundle;
+
+  //  Return average diagonal of trace points + the 2 end points
+
+static int ave_tp_diag(Path *path)
+{ int     tlen;
+  uint16 *trace;
+  int64   ave;
+  int     ab, bb;
+  int     i;
+
+  tlen  = path->tlen-2;
+  trace = path->trace;
+
+  ab = path->abpos;
+  bb = path->bbpos;
+  ave = ab-bb;
+  ab = (ab/TSPACE)*TSPACE;
+  for (i = 1; i < tlen; i += 2)
+    { ab = ab + TSPACE;
+      bb = bb + trace[i];
+      ave += (ab-bb); 
+    }
+  ave += path->aepos - path->bepos;
+  return ((int) ((ave/(tlen/2+2.))+.5));
+}
 
 typedef struct
   { uint16  diag;
@@ -308,6 +634,10 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
   int64      *t64   = bundle->trace;
   int         tmax  = bundle->tmax;
 
+  OneFile    *mfile   = bundle->mfile;
+  int         mscf    = bundle->mscf;
+  int64       moff    = bundle->moff;
+
   int     i, p, x, c;
   int     d, e, f;
   uint16  kmer;
@@ -316,8 +646,9 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
   uint16 *diags;  // DIAG_MAX < 0x08000
   Seed   *post;   // 0x08000
   Seed   *hits;   // 0x08000
-  uint8 *s7;
-  int    l7;
+  uint8  *s7;
+  int     l7;
+  double  freq[4];
 
   count = (uint16 *) bundle->block;
   index = count + 0x10000;
@@ -338,13 +669,29 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
   s7 = seq+7;
   l7 = len-7;
 
-  kmer = seq[0];                 //  count # of each 8-mer
-  for (i = 1; i < 7; i++)
-    kmer = (kmer << 2) | seq[i];
-  for (i = 0; i < l7; i++)
-    { kmer = (kmer << 2) | s7[i];
-      count[kmer] += 1;
-    }
+  { int    fqi[4];
+    uint16 u;
+
+    for (i = 0; i < 4; i++)
+      fqi[i] = 0;
+
+    kmer = seq[0];                 //  count # of each 8-mer
+    fqi[kmer] = 1;
+    for (i = 1; i < 7; i++)
+      { u = seq[i];
+        kmer = (kmer << 2) | u;
+        fqi[u] += 1;
+      }
+    for (i = 0; i < l7; i++)
+      { u = s7[i];
+        kmer = (kmer << 2) | u;
+        count[kmer] += 1;
+        fqi[u] += 1;
+      }
+
+    for (i = 0; i < 4; i++)
+      freq[i] = (1.*fqi[i]) / len;
+  }
 
   p = 0;                         //  turn counts into ptrs
   for (i = 0; i < 0x10000; i++)
@@ -399,7 +746,7 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
       p += x;
     }
 
-  for (i = 0; i < DIAG_MAX; i++)        //  init diagonal tube counters
+  for (i = 0; i < DIAG_MAX; i++)  //  init diagonal tube counters
     diags[i] = 0;
 
   e = index[0] & 0x7fff;
@@ -457,12 +804,12 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
   { int   ncnt;
     int   outhit, end, beg;
     Chord *hist = (Chord *) post;
-    int   wide, anti, last;
-    Path *bpath;
+    int   unit, wide, anti, last;
+    Path *path;
 
     ncnt = 0;
-    p = diags[1];
-    for (i = 2; i < DIAG_MAX; i++)
+    p = diags[DIAG_MIN-1];
+    for (i = DIAG_MIN; i < DIAG_MAX; i++)
       { f = diags[i];
         if (f-p > 1 && f-p > (i>>6))
           { hist[ncnt].count = f-p;
@@ -486,6 +833,7 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
     outhit = 0;
     for (i = 0; i < ncnt; i++)
       { d = hist[i].diag;
+
         last = -1;
 #ifdef SHOW_SEARCH
         printf(" %4d: %5d\n",d,diags[d]-diags[d-1]);
@@ -493,26 +841,27 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
         for (x = diags[d-1]+1; x < diags[d]; x++)
           { p = hits[x].ibeg;
 #ifdef SHOW_SEARCH
-            printf("  p = %d (%d %d %d\n",p,last,hits[x-1].ibeg,mark[p+1]);
+            printf("  p = %d (%d %d) %d\n",p,last,hits[x-1].ibeg,off);
+            fflush(stdout);
 #endif
-            if (p < last || p - hits[x-1].ibeg > d || seq[p+1] >= 4)
+            if (p < last || p - hits[x-1].ibeg > d || seq[p] >= 4 || seq[p+7] >= 4)
               continue;
+
             wide = .2*d;
             if (wide < 1)
               wide = 1;
             anti = 2*(off + p) + d;
-            bpath = Local_Alignment(align,work,spec,d,d,anti,wide,wide);
-#ifdef SHOW_SEARCH
-            if (bpath == NULL)
-              printf("    NULL\n");
-            else
-              printf("    %d (%d)  %d-%d-%d\n",bpath->bepos-bpath->abpos,2*d,d-wide,d,d+wide);
-#endif
-            if (bpath == NULL)
-              continue;
+            Local_Alignment(align,work,spec,d,d,anti,wide,wide);
 
-            end = bpath->bepos - off;
-            beg = bpath->abpos - off;
+            path = align->path;
+#ifdef SHOW_SEARCH
+            printf("    %d (%d)  %d-%d-%d\n",path->aepos-path->bbpos,2*d,d-wide,d,d+wide);
+            printf(" Hit spans %d-%d (unit = %d)\n",path->bbpos,path->aepos,unit);
+            fflush(stdout);
+#endif
+
+            end = path->aepos - off;
+            beg = path->bbpos - off;
 
             if (beg > p || end <= p)
               continue;
@@ -521,58 +870,104 @@ static int spectrum_block(uint8 *seq, int off, int len, S_Bundle *bundle)
             if (end-beg < 1.95*d)
               continue;
 
+            unit = ave_tp_diag(path);
+
             if (over->path.tlen > tmax)
               { tmax = bundle->tmax = 1.2*over->path.tlen + 1000;
                 t64  = bundle->trace = realloc(t64,sizeof(int64)*tmax);
               }
-            Write_Aln_Overlap(ofile,over);
-            Compress_TraceTo8(over,0);
-            Write_Aln_Trace(ofile,over->path.trace,over->path.tlen,t64);
-            oneInt(ofile,0) = d;
-            oneWriteLine(ofile,'U',0,0);
 
-            Decompress_TraceTo16(over);
+            if (MAKE_ALN)
+              { Write_Aln_Overlap(ofile,over);
+                Compress_TraceTo8(over,0);
+                Write_Aln_Trace(ofile,over->path.trace,over->path.tlen,t64,unit);
+              }
+
+            if (MAKE_ANO)
+              { char mstring[20];
+                int  mlen;
+
+                oneInt(mfile,0) = mscf;
+                oneInt(mfile,1) = path->bbpos + moff;
+                oneInt(mfile,2) = path->bepos + moff;
+                oneWriteLine(mfile,'M',0,NULL);
+                mlen = sprintf(mstring,"%d",unit);
+                oneWriteLine(mfile,'L',mlen,mstring);
+                oneInt(mfile,0) = (100.*path->diffs) / (path->aepos-path->abpos);
+                oneWriteLine(mfile,'X',0,NULL);
+              }
+
+#if defined(SHOW_ALIGNMENTS) || defined(DO_CUT)
+            if (MAKE_ALN)
+              Decompress_TraceTo16(over);
+            Compute_Trace_PTS(align,work,100,GREEDIEST,d-wide,d+wide);
+#endif
 
 #ifdef SHOW_ALIGNMENTS
 #ifndef SHOW_SEARCH
             if (last < 0)
               printf(" %4d: %5d\n",d,diags[d]-diags[d-1]);
             printf("\n");
+            fflush(stdout);
 #endif
-            printf(" Hit spans %d-%d\n",bpath->abpos,bpath->bepos);
-            Compute_Trace_PTS(align,work,100,GREEDIEST,d-wide,d+wide);
-            Print_Alignment(stdout,align,work,8,100,10,0,10,0);
+            printf(" Hit spans %d-%d (unit = %d)\n",path->bbpos,path->aepos,unit);
+            Print_Reference(stdout,align,work,8,100,10,0,10,0);
+            fflush(stdout);
 #endif
 
-            if (bpath->aepos < bpath->bbpos)
-              { for (f = (bpath->bbpos-off)+1; f <= end; f++)
+            if (path->bepos < path->abpos)
+              { for (f = (path->abpos-off); f < end; f++)
                   seq[f] = 4;
-                end = bpath->aepos-off;
-                for (f = beg+1; f <= end; f++)
+                end = path->bepos-off;
+                for (f = beg; f < end; f++)
                   seq[f] = 4;
 
-#ifdef COMPUTE_MODEL
-                printf("  Near Tandem %d-%d\n",bpath->bbpos-bpath->aepos,bpath->aepos-bpath->abpos);
+#ifdef SHOW_ALIGNMENTS
+                printf("  Near Tandem len = %d gap = %d\n",
+                       path->aepos-path->bbpos,path->abpos-path->bepos);
+                fflush(stdout);
 #endif
               }
             else
-              { 
-#ifdef COMPUTE_MODEL
-                compute_model(seq+beg,end-beg,count,d);
-#endif
+              { if (PARSE)
+                  { int    xmer, kloc, len;
+                    int64 *part;
 
-                for (f = beg+1; f <= end; f++)
+                    if (unit < 8)
+                      xmer = 8;
+                    else if (unit <= 64)
+                      xmer = unit;
+                    else
+                      xmer = (unit-64)*.07 + 64;  // sync seed length is 7% of unit length
+
+                    kloc = best_seed(seq+beg,end-beg,count,xmer,unit);
+                    len  = end-beg;
+                    part = bitvec_partition(seq+beg,&len,seq+beg+kloc,xmer,unit);
+
+                    oneWriteLine(mfile,'P',len,part);
+
+                    free(part);
+                  }
+
+                for (f = beg; f < end; f++)
                   seq[f] = 4;
               }
 
-            if (bpath->bepos > outhit)
-              outhit = bpath->bepos;
+            if (path->aepos > outhit)
+              outhit = path->aepos;
           }
       }
 
     return (outhit);
   }
 }
+
+
+/*******************************************************************************************
+ *
+ *  THREADS: ONE PER CONTIG
+ *
+ ********************************************************************************************/
 
 static pthread_mutex_t TMUTEX;
 static pthread_cond_t  TCOND;
@@ -583,9 +978,10 @@ static pthread_cond_t  TCOND;
 static int *Tstack;
 static int  Tavail;
 
-//  for 1st k-mer byte range [beg,end), find each group of equal k-mers, then
-//    overwrite to the bottom of the range.  K-mer payloads contain the prefix mask, count,
-//    and then the contig/position location.
+//  Thread to process a contig of a GDB.  Set up thread's personal data structures and
+//    then process the contig in 32Kbp blocks overlaping by 8Kbp.  The one exception to
+//    this is if a very long satellite whose alignment extends beyond the current 32Kbp
+//    block, in which case the next block begins at the end of this alignment.
 
 static void *compress_thread(void *args)
 { S_Bundle *bundle = (S_Bundle *) args;
@@ -606,20 +1002,25 @@ static void *compress_thread(void *args)
   bundle->align->alen  = bundle->align->blen = clen;
   bundle->over->bread  = i;
 
+  bundle->mscf = gdb->contigs[i].scaf;
+  bundle->moff = gdb->contigs[i].sbeg;
+
   last = -1;
-  if (clen < 0x8000)
+  if (clen <= 0x8000)
     spectrum_block(buffer,0,clen,bundle);
   else
-    for (p = 0; p+0x2000 <= clen; p += 0x6000)
-      { if (p+0x8000 > clen)
-          spectrum_block(buffer+p,p,clen-p,bundle);
+    for (p = 0; p+7 < clen; p += BLOCK_OVERLAP)
+      { if (p+0x8000 >= clen)
+          { spectrum_block(buffer+p,p,clen-p,bundle);
+            break;
+          }
         else
           { last = spectrum_block(buffer+p,p,0x8000,bundle);
-            if (last >= p+0x6000)
-              p = last-0x6000;
+            if (last >= p+BLOCK_OVERLAP)
+              p = last-BLOCK_OVERLAP;
           }
       }
- 
+
   pthread_mutex_lock(&TMUTEX);   //  Put this thread back on the avail stack
     Tstack[Tavail++] = bundle->tid;
   pthread_mutex_unlock(&TMUTEX);
@@ -629,10 +1030,21 @@ static void *compress_thread(void *args)
   return (NULL);
 }
 
+
+/*******************************************************************************************
+ *
+ *  MAIN
+ *
+ ********************************************************************************************/
+
 int main(int argc, char *argv[])
-{ FILE   **units;
-  GDB     _gdb, *gdb = &_gdb;
-  OneFile *Ofile;
+{ FILE     **units;
+  char      *spath;
+  GDB       _gdb, *gdb = &_gdb;
+  char      *TRGT_PATH;
+  OneFile   *Ofile;
+  OneFile   *Mfile;
+  OneSchema *anoSchema;
 
   (void) Print_Seq;
   (void) emer;
@@ -645,14 +1057,18 @@ int main(int argc, char *argv[])
 
     ARG_INIT("FasTAN")
 
-    NTHREADS = 8;
+    NTHREADS  = 8;
+    TRGT_PATH = NULL;
 
     j = 1;
     for (i = 1; i < argc; i++)
       if (argv[i][0] == '-')
         switch (argv[i][1])
         { default:
-            ARG_FLAGS("vm")
+            ARG_FLAGS("vamp")
+            break;
+          case 'o':
+            TRGT_PATH = argv[i]+2;
             break;
           case 'T':
             ARG_NON_NEGATIVE(NTHREADS,"number of threads to use");
@@ -662,68 +1078,119 @@ int main(int argc, char *argv[])
         argv[j++] = argv[i];
     argc = j;
 
-    VERBOSE = flags['v'];
-    MODELS  = flags['m'];
-    MODELS  = 0;              //  Not yet realized
+    VERBOSE  = flags['v'];
+    MAKE_ALN = flags['a'];
+    MAKE_ANO = flags['m'];
+    PARSE    = flags['p'];
 
-    if (argc != 3)
+    if (argc != 2)
       { fprintf(stderr,"Usage: %s %s\n",Prog_Name,Usage);
         fprintf(stderr,"\n");
         fprintf(stderr,"           <fa_extn> = (.fa|.fna|.fasta)[.gz]\n");
         fprintf(stderr,"           <1_extn>  = any valid 1-code sequence file type\n");
         fprintf(stderr,"\n");
         fprintf(stderr,"      -v: Verbose mode, output statistics as proceed.\n");
+        fprintf(stderr,"      -a: Make a .1aln of all the hits found.\n");
+        fprintf(stderr,"      -m: Make a .1ano mask of the hits found.\n");
+        fprintf(stderr,"      -p: Parse hits into units.\n");
+        fprintf(stderr,"\n");
+        fprintf(stderr,"      -o: Root path of .1aln/.1ano file (default root path of input).\n");
         fprintf(stderr,"      -T: Number of threads to use.\n");
-        fprintf(stderr,"      -m: Compute models of each hit (not yet implemented).\n");
+        exit (1);
+      }
+
+    if (! (MAKE_ALN || MAKE_ANO))
+      { fprintf(stderr,"%s: Must set at least one of -a or -m options\n",Prog_Name);
+        exit (1);
+      }
+    if (PARSE && !MAKE_ANO)
+      { fprintf(stderr,"%s: Must set at least one of -m if set -p option\n",Prog_Name);
         exit (1);
       }
   }
 
   //  Get GDB or make a temporary if a fasta
 
-  { char *tpath, *spath;
-    char *cpath, *APATH, *AROOT;
+  { char *cpath, *APATH, *AROOT;
+    int   ftype;
 
-    Get_GDB_Paths(argv[1],NULL,&spath,&tpath,0);
+    ftype = Get_GDB_Paths(argv[1],NULL,&spath,&cpath,0);
+
+    free(cpath);
+
+    if (MAKE_ANO && ftype != IS_GDB)
+      { fprintf(stderr,"%s: The source must be a GDB when masking (-m) is on\n",Prog_Name);
+        exit (1);
+      }
   
-    units = Get_GDB(gdb,spath,".",NTHREADS);
+    units = Get_GDB(gdb,spath,".",NTHREADS,NULL);
 
-    free(tpath);
+    //  Get target root path
 
-    //  Open 1aln file for threaded writing
+    if (TRGT_PATH == NULL)
+      { AROOT = Root(spath,NULL);
+        APATH = PathTo(spath);
+      }
+    else
+      { if (strcmp(TRGT_PATH + (strlen(TRGT_PATH)-4), ".1aln") ||
+            strcmp(TRGT_PATH + (strlen(TRGT_PATH)-4), ".1ano"))
+          AROOT = Root(TRGT_PATH,NULL);
+        else
+          AROOT = Root(TRGT_PATH,"");
+        APATH = PathTo(TRGT_PATH);
+      }
 
-    APATH = PathTo(argv[2]);
-    AROOT = Root(argv[2],".1aln");
     cpath = getcwd(NULL,0);
 
-    Ofile = open_Aln_Write(Catenate(APATH,"/",AROOT,".1aln"),NTHREADS,Prog_Name,VERSION,
-                           Command_Line,TSPACE,spath,NULL,cpath);
+    //  Open output files
+
+    if (MAKE_ALN)
+      { Ofile = open_Aln_Write(Catenate(APATH,"/",AROOT,".1aln"),NTHREADS,Prog_Name,VERSION,
+                               Command_Line,TSPACE,spath,NULL,cpath);
+
+        Write_Skeleton(Ofile,gdb);
+      }
+
+    if (MAKE_ANO)
+      { anoSchema = make_ANO_Schema();
+        Mfile = oneFileOpenWriteNew(Catenate(APATH,"/",AROOT,".1ano"),anoSchema,"ano",1,NTHREADS);
+
+        oneAddProvenance(Mfile,Prog_Name,VERSION,Command_Line);
+
+        oneAddReference(Mfile,gdb->srcpath,1);
+
+        Write_Skeleton(Mfile,gdb);
+      }
+
     free(cpath);
     free(AROOT);
     free(APATH);
-    free(spath);
-
-    Write_Aln_Skeleton(Ofile,gdb);
   }
 
   if (VERBOSE)
-    { fprintf(stderr," Database built, begin scan\n");
+    { fprintf(stderr,"\n  Database loaded, begin scan of %d contigs\n\n",gdb->ncontig);
       fflush(stderr);
     }
 
   StartTime();
 
   { int       i, tid;
+    int       done, launch;
     pthread_t threads[NTHREADS];
     S_Bundle  parm[NTHREADS];
     int       tstack[NTHREADS];
 
     for (i = 0; i < NTHREADS; i++)
       { parm[i].tid   = i;
-        parm[i].ofile = Ofile + i;
-        parm[i].gdb   = gdb;
-        parm[i]._gdb  = _gdb;
+        if (MAKE_ALN)
+          parm[i].ofile = Ofile + i;
+        else
+          parm[i].ofile = NULL;
+
+        parm[i].gdb  = &parm[i]._gdb;
+        parm[i]._gdb = _gdb;
         parm[i]._gdb.seqs = units[i];
+
         parm[i].work  = New_Work_Data();
         if (i == 0)
           parm[i].spec = New_Align_Spec(.7,TSPACE,gdb->freq,0);
@@ -734,10 +1201,15 @@ int main(int argc, char *argv[])
         parm[i].align->path  = &(parm[i]._over.path);
         parm[i].align->flags = 0;
         parm[i].over->flags  = 0;
-        parm[i].block  = malloc(9*0x10000);   // 576KB
-        parm[i].buffer = ((uint8 *) malloc(gdb->maxctg + 4)) + 1;
-        parm[i].tmax   = 10000;
-        parm[i].trace  = malloc(sizeof(int64)*10000);
+        parm[i].block   = malloc(9*0x10000);   // 576KB
+        parm[i].buffer  = ((uint8 *) malloc(gdb->maxctg + 4)) + 1;
+        if (MAKE_ANO)
+          parm[i].mfile = Mfile + i;
+        else
+          parm[i].mfile = NULL;
+        parm[i].tmax    = 10000;
+        parm[i].trace   = malloc(sizeof(int64)*10000);
+
         if (parm[i].block == NULL || parm[i].buffer == NULL || parm[i].trace == NULL)
           { fprintf(stderr,"%s: Not enough memory\n",Prog_Name);
             exit (1);
@@ -752,6 +1224,8 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&TMUTEX,NULL);
     pthread_cond_init(&TCOND,NULL);
 
+    done   = -NTHREADS;
+    launch = 0;
     for (i = 0; i < gdb->ncontig; i++)
       { pthread_mutex_lock(&TMUTEX);
 
@@ -762,21 +1236,42 @@ int main(int argc, char *argv[])
 
         pthread_mutex_unlock(&TMUTEX);
 
-        // Launching job for contig i on thread tid
+        done   += 1;
+        launch += 1;
 
-// printf("Launching %d\n",i); fflush(stdout);
+        // Launching job for contig i on thread tid
 
         parm[tid].over->aread = i;
 
+        if (VERBOSE)
+          { if (done >= 0)
+              fprintf(stderr,"\r  Launched %3d  Finished %3d",launch,done);
+            else
+              fprintf(stderr,"\r  Launched %3d  Finished   0",launch);
+            fflush(stdout);
+          }
+
         pthread_create(threads+tid,NULL,compress_thread,parm+tid);
+        pthread_detach(threads[tid]);
       }
 
 #ifndef DEBUG_THREADS
     pthread_mutex_lock(&TMUTEX);   //  Wait for all the jobs to complete
     while (Tavail < NTHREADS)
-      pthread_cond_wait(&TCOND,&TMUTEX);
+      { pthread_cond_wait(&TCOND,&TMUTEX);
+        done += 1;
+        if (VERBOSE)
+          { fprintf(stderr,"\r  Launched %3d  Finished %3d",gdb->ncontig,done);
+            fflush(stdout);
+          }
+      }
     pthread_mutex_unlock(&TMUTEX);
 #endif
+
+    if (VERBOSE)
+      { fprintf(stderr,"\n");
+        fflush(stderr);
+      }
 
     for (i = 0; i < NTHREADS; i++)
       { free(parm[i].trace);
@@ -784,17 +1279,28 @@ int main(int argc, char *argv[])
         free(parm[i].block);
         if (i == 0)
           Free_Align_Spec(parm[i].spec);
+        else
+          fclose(units[i]);
         Free_Work_Data(parm[i].work);
       }
 
-    oneFileClose(Ofile);
+    if (MAKE_ANO)
+      { oneFileClose(Mfile);
+        oneSchemaDestroy(anoSchema);
+      }
+    if (MAKE_ALN)
+      oneFileClose(Ofile);
 
+    if (NTHREADS > 1)
+      free(units);
     Close_GDB(gdb);
 
     if (VERBOSE)
       { TimeTo(stderr,0,1);
         TimeTo(stderr,1,0);
       }
+
+    free(spath);
 
     Catenate(NULL,NULL,NULL,NULL);
     Numbered_Suffix(NULL,0,NULL);
