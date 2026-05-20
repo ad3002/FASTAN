@@ -1125,7 +1125,7 @@ int main(int argc, char *argv[])
   
     units = Get_GDB(gdb,spath,".",NTHREADS,NULL);
 
-    //  Open 1aln file for threaded writing
+    //  Get target root path
 
     if (TRGT_PATH == NULL)
       { AROOT = Root(spath,NULL);
@@ -1141,6 +1141,8 @@ int main(int argc, char *argv[])
       }
 
     cpath = getcwd(NULL,0);
+
+    //  Open output files
 
     if (MAKE_ALN)
       { Ofile = open_Aln_Write(Catenate(APATH,"/",AROOT,".1aln"),NTHREADS,Prog_Name,VERSION,
@@ -1250,6 +1252,7 @@ int main(int argc, char *argv[])
           }
 
         pthread_create(threads+tid,NULL,compress_thread,parm+tid);
+        pthread_detach(threads[tid]);
       }
 
 #ifndef DEBUG_THREADS
