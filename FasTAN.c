@@ -203,7 +203,20 @@ static int64 *bitvec_partition(uint8 *seq, int *len, uint8 *pat, int patlen, int
     uint64 m[nblocks+1];
     uint64 a[nblocks+1];
     uint64 b[nblocks+1];
-  
+
+    /* Zero-initialize stack VLAs. Without this, the bit-vector match
+       loop below reads positions before all of them have been
+       deterministically written, producing ASLR-dependent output (uninit
+       stack contents vary across runs even with -T1). Valgrind localized
+       all 6 reported "Conditional jump on uninit" sites to this stack
+       allocation. */
+    memset(revt, 0, sizeof(revt));
+    memset(fort, 0, sizeof(fort));
+    memset(p,    0, sizeof(p));
+    memset(m,    0, sizeof(m));
+    memset(a,    0, sizeof(a));
+    memset(b,    0, sizeof(b));
+
     //  setup pattern vectors
   
     { uint8 *rat;
