@@ -17,9 +17,10 @@ ALL = $(BIN_DIR)/FasTAN
 
 # Source files
 FASTAN_SRCS = $(SRC_DIR)/FasTAN.c $(SRC_DIR)/alncode.c $(SRC_DIR)/align.c \
-              $(SRC_DIR)/GDB.c $(SRC_DIR)/gene_core.c $(SRC_DIR)/ONElib.c
-FASTAN_HDRS = $(SRC_DIR)/alncode.h $(SRC_DIR)/GDB.h $(SRC_DIR)/ONElib.h \
-              $(SRC_DIR)/align.h $(SRC_DIR)/gene_core.h
+              $(SRC_DIR)/ANO.c $(SRC_DIR)/GDB.c $(SRC_DIR)/gene_core.c \
+              $(SRC_DIR)/ONElib.c
+FASTAN_HDRS = $(SRC_DIR)/alncode.h $(SRC_DIR)/ANO.h $(SRC_DIR)/GDB.h \
+              $(SRC_DIR)/ONElib.h $(SRC_DIR)/align.h $(SRC_DIR)/gene_core.h
 
 # Default target
 all: $(BIN_DIR) $(ALL)
