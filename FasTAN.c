@@ -41,7 +41,23 @@
 #define VERSION  "0.5"
 #define MBUF_LEN   200  //  Must be even
 
-static char *Usage = "[-vamp] [-T(8)] [-o<target>] <source:path>[<fa_extn>|<1_extn>|.1gdb]";
+//  Satellome fork build provenance.  BUILD_SHA is injected by the Makefile
+//    (-DBUILD_SHA=...) from `git rev-parse --short HEAD`; it stays "unknown"
+//    only when built outside a git checkout.
+#ifndef BUILD_SHA
+#define BUILD_SHA "unknown"
+#endif
+#define FORK_TAG          "satellome-fork:ad3002"
+#define FASTAN_SIGNATURE  "FasTAN " VERSION " [" FORK_TAG " " BUILD_SHA "]"
+#define PROV_VERSION      VERSION " [" FORK_TAG " " BUILD_SHA "]"
+
+//  Greppable marker so the build can be identified from the binary image alone
+//    (`strings`), even when it cannot be executed.  __attribute__((used)) keeps
+//    the linker from stripping it under -O3.
+__attribute__((used)) static const char FASTAN_MARK[] =
+    "FASTAN_SATELLOME_SIGNATURE=ad3002:" BUILD_SHA ":" VERSION;
+
+static char *Usage = "[-vamp] [-V] [-T(8)] [-o<target>] <source:path>[<fa_extn>|<1_extn>|.1gdb]";
 
 static int NTHREADS;
 static int VERBOSE;
@@ -1080,6 +1096,9 @@ int main(int argc, char *argv[])
         { default:
             ARG_FLAGS("vamp")
             break;
+          case 'V':
+            printf("%s\n",FASTAN_SIGNATURE);
+            exit(0);
           case 'o':
             TRGT_PATH = argv[i]+2;
             break;
@@ -1109,6 +1128,7 @@ int main(int argc, char *argv[])
         fprintf(stderr,"\n");
         fprintf(stderr,"      -o: Root path of .1aln/.1ano file (default root path of input).\n");
         fprintf(stderr,"      -T: Number of threads to use.\n");
+        fprintf(stderr,"      -V: Print build signature (%s) and exit.\n",FASTAN_SIGNATURE);
         exit (1);
       }
 
@@ -1158,7 +1178,7 @@ int main(int argc, char *argv[])
     //  Open output files
 
     if (MAKE_ALN)
-      { Ofile = open_Aln_Write(Catenate(APATH,"/",AROOT,".1aln"),NTHREADS,Prog_Name,VERSION,
+      { Ofile = open_Aln_Write(Catenate(APATH,"/",AROOT,".1aln"),NTHREADS,Prog_Name,PROV_VERSION,
                                Command_Line,TSPACE,spath,NULL,cpath);
 
         Write_Skeleton(Ofile,gdb);
@@ -1168,7 +1188,7 @@ int main(int argc, char *argv[])
       { anoSchema = make_ANO_Schema();
         Mfile = oneFileOpenWriteNew(Catenate(APATH,"/",AROOT,".1ano"),anoSchema,"ano",1,NTHREADS);
 
-        oneAddProvenance(Mfile,Prog_Name,VERSION,Command_Line);
+        oneAddProvenance(Mfile,Prog_Name,PROV_VERSION,Command_Line);
 
         oneAddReference(Mfile,gdb->srcpath,1);
 

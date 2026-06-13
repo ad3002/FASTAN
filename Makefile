@@ -9,6 +9,12 @@ CFLAGS = -O3 -Wall -Wextra -Wno-unused-result -fno-strict-aliasing
 CC = gcc
 LDFLAGS = -lm -lz -lpthread
 
+# Satellome fork: stamp the short git commit into the binary so the build is
+#   self-identifying (FasTAN -V, .1aln provenance, and the embedded marker).
+#   Falls back to "unknown" when built outside a git checkout.
+BUILD_SHA := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+CFLAGS += -DBUILD_SHA=\"$(BUILD_SHA)\"
+
 # Source path
 VPATH = $(SRC_DIR)
 
