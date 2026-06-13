@@ -1,0 +1,5 @@
+# Build artifacts
+bin/
+*.o
+*.dSYM/
+FasTAN.tar.gz
