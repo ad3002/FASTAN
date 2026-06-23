@@ -38,7 +38,7 @@
 #define BLOCK_OVERLAP  0x6000
 
 #define TSPACE     100
-#define VERSION  "0.5"
+#define VERSION  "0.8"
 #define MBUF_LEN   200  //  Must be even
 
 //  Satellome fork build provenance.  BUILD_SHA is injected by the Makefile
@@ -1062,6 +1062,99 @@ static void *compress_thread(void *args)
 
 /*******************************************************************************************
  *
+ *  DETERMINISTIC OUTPUT SORT
+ *
+ *  The threaded writer emits .1aln records in thread-completion order, which varies run to
+ *  run (and with -T).  The *set* of records is identical regardless of -T, only the order
+ *  differs.  To make output deterministic and -T-independent, re-read the just-written
+ *  .1aln, sort the records by (aread, abpos, aepos), and rewrite in place.
+ *
+ ********************************************************************************************/
+
+typedef struct
+  { Overlap  ovl;
+    int      tlen;
+    uint8   *trace;
+    int      period;
+  } AlnRec;
+
+static int ALNREC_SORT(const void *l, const void *r)
+{ const AlnRec *x = (const AlnRec *) l;
+  const AlnRec *y = (const AlnRec *) r;
+  if (x->ovl.aread != y->ovl.aread)
+    return (x->ovl.aread < y->ovl.aread ? -1 : 1);
+  if (x->ovl.path.abpos != y->ovl.path.abpos)
+    return (x->ovl.path.abpos < y->ovl.path.abpos ? -1 : 1);
+  if (x->ovl.path.aepos != y->ovl.path.aepos)
+    return (x->ovl.path.aepos < y->ovl.path.aepos ? -1 : 1);
+  return (0);
+}
+
+static void Sort_Aln_File(char *path, GDB *gdb, char *spath)
+{ OneFile *in, *out;
+  int64    novl, i;
+  int      tspace, tmax;
+  char    *db1, *db2, *cp1, *cpath, *tmppath;
+  AlnRec  *recs;
+  uint8   *tbuf;
+  int64   *t64;
+
+  in = open_Aln_Read(path,1,&novl,&tspace,&db1,&db2,&cp1);
+  if (in == NULL || novl <= 0)
+    { if (in != NULL) oneFileClose(in);
+      return;
+    }
+
+  while (in->lineType != 'A')        //  skip the GDB skeleton; we rewrite it from 'gdb' below
+    if ( ! oneReadLine(in))
+      { oneFileClose(in); return; }
+
+  //  longest possible trace: 2 bytes / trace point, ~1 trace point / tspace bp, <= maxctg bp
+
+  tmax = 2*(gdb->maxctg/tspace) + 1024;
+  tbuf = (uint8 *) malloc(tmax);
+  recs = (AlnRec *) malloc(sizeof(AlnRec)*novl);
+  t64  = (int64 *) malloc(sizeof(int64)*(tmax/2+16));
+  if (tbuf == NULL || recs == NULL || t64 == NULL)
+    { fprintf(stderr,"%s: Not enough memory to sort %lld alignments\n",Prog_Name,novl);
+      exit (1);
+    }
+
+  for (i = 0; i < novl; i++)
+    { Read_Aln_Overlap(in,&recs[i].ovl);
+      recs[i].tlen  = Read_Aln_Trace(in,tbuf,&recs[i].period);
+      recs[i].trace = (uint8 *) malloc(recs[i].tlen > 0 ? recs[i].tlen : 1);
+      memcpy(recs[i].trace,tbuf,recs[i].tlen);
+    }
+  oneFileClose(in);
+
+  qsort(recs,novl,sizeof(AlnRec),ALNREC_SORT);
+
+  tmppath = (char *) malloc(strlen(path)+8);
+  sprintf(tmppath,"%s.srt",path);
+  cpath = getcwd(NULL,0);
+
+  out = open_Aln_Write(tmppath,1,Prog_Name,PROV_VERSION,Command_Line,tspace,spath,NULL,cpath);
+  Write_Skeleton(out,gdb);
+  for (i = 0; i < novl; i++)
+    { Write_Aln_Overlap(out,&recs[i].ovl);
+      Write_Aln_Trace(out,recs[i].trace,recs[i].tlen,t64,recs[i].period);
+      free(recs[i].trace);
+    }
+  oneFileClose(out);
+
+  if (rename(tmppath,path) != 0)
+    { fprintf(stderr,"%s: Failed to install sorted .1aln (%s -> %s)\n",Prog_Name,tmppath,path);
+      exit (1);
+    }
+
+  free(cpath); free(tmppath); free(t64); free(recs); free(tbuf);
+  free(db1); if (db2 != NULL) free(db2); free(cp1);
+}
+
+
+/*******************************************************************************************
+ *
  *  MAIN
  *
  ********************************************************************************************/
@@ -1074,6 +1167,7 @@ int main(int argc, char *argv[])
   OneFile   *Ofile;
   OneFile   *Mfile;
   OneSchema *anoSchema;
+  char      *aln_outpath = NULL;
 
   (void) Print_Seq;
   (void) emer;
@@ -1178,7 +1272,8 @@ int main(int argc, char *argv[])
     //  Open output files
 
     if (MAKE_ALN)
-      { Ofile = open_Aln_Write(Catenate(APATH,"/",AROOT,".1aln"),NTHREADS,Prog_Name,PROV_VERSION,
+      { aln_outpath = Strdup(Catenate(APATH,"/",AROOT,".1aln"),"Allocating .1aln path");
+        Ofile = open_Aln_Write(aln_outpath,NTHREADS,Prog_Name,PROV_VERSION,
                                Command_Line,TSPACE,spath,NULL,cpath);
 
         Write_Skeleton(Ofile,gdb);
@@ -1322,7 +1417,10 @@ int main(int argc, char *argv[])
         oneSchemaDestroy(anoSchema);
       }
     if (MAKE_ALN)
-      oneFileClose(Ofile);
+      { oneFileClose(Ofile);
+        Sort_Aln_File(aln_outpath,gdb,spath);   //  sort records -> deterministic, -T-independent
+        free(aln_outpath);
+      }
 
     if (NTHREADS > 1)
       free(units);
